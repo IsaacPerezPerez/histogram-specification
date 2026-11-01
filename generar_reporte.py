@@ -1,149 +1,276 @@
 import csv
 import json
+from functools import lru_cache
 from pathlib import Path
-import textwrap
 
+import cv2
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib.font_manager import FontProperties
+from matplotlib.textpath import TextToPath
 import numpy as np
 
+from src.histograma import cdf, histograma
+from main import leer
+
 RAIZ = Path(__file__).resolve().parent
-AZUL = '#203b60'
+plt.rcParams.update({'font.family': 'STIXGeneral', 'mathtext.fontset': 'stix',
+                     'pdf.fonttype': 42, 'font.size': 10})
+ANCHO, ALTO = 612, 792
+MARGEN, COLUMNA = 45, 252
 
 
-def pagina(titulo, numero):
-    figura = plt.figure(figsize=(11.69, 8.27), facecolor='white')
-    figura.text(0.055, 0.93, titulo, fontsize=21, color=AZUL, fontweight='bold')
-    figura.text(0.055, 0.035, 'Visión por Computadora | T4 | Isaac Pérez Pérez', fontsize=9, color='#555555')
-    figura.text(0.94, 0.035, str(numero), fontsize=9, ha='right', color='#555555')
-    return figura
+@lru_cache(maxsize=4096)
+def medir(texto, tamano=10, negrita=False):
+    fuente = FontProperties(family='STIXGeneral', size=tamano,
+                           weight='bold' if negrita else 'normal')
+    return TextToPath().get_text_width_height_descent(texto, fuente, False)[0]
 
 
-def columna(figura, bloques, x, y=0.845, ancho=64):
-    for subtitulo, texto in bloques:
-        figura.text(x, y, subtitulo, fontsize=12, fontweight='bold', color=AZUL, va='top')
-        y -= 0.038
-        for parrafo in texto.split('\n'):
-            lineas = textwrap.wrap(parrafo, width=ancho, break_long_words=True, break_on_hyphens=False)
-            figura.text(x, y, '\n'.join(lineas), fontsize=10.6, linespacing=1.4, va='top')
-            y -= max(1, len(lineas)) * 0.0245 + 0.015
-        y -= 0.018
-    if y < 0.075:
-        raise ValueError(f'Texto demasiado largo para la página: {y:.3f}')
+def envolver(texto, ancho, tamano=10, negrita=False):
+    lineas, linea = [], ''
+    for palabra in texto.split():
+        if medir(palabra, tamano, negrita) > ancho:
+            partes, parte = [], ''
+            for caracter in palabra:
+                if medir(parte + caracter, tamano, negrita) > ancho:
+                    partes.append(parte)
+                    parte = ''
+                parte += caracter
+            palabras = partes + [parte]
+        else:
+            palabras = [palabra]
+        for fragmento in palabras:
+            candidata = (linea + ' ' + fragmento).strip()
+            if linea and medir(candidata, tamano, negrita) > ancho:
+                lineas.append(linea)
+                linea = fragmento
+            else:
+                linea = candidata
+    if linea:
+        lineas.append(linea)
+    return lineas
 
 
-def guardar(pdf, figura):
-    pdf.savefig(figura)
-    plt.close(figura)
+def texto(figura, x, y, contenido, tamano=10, **opciones):
+    return figura.text(x / ANCHO, y / ALTO, contenido, fontsize=tamano,
+                       va='baseline', **opciones)
+
+
+def linea(figura, x, y, contenido, ancho, justificar=False, tamano=10, negrita=False):
+    palabras = contenido.split()
+    estilo = {'fontweight': 'bold' if negrita else 'normal'}
+    if not justificar or len(palabras) < 2:
+        texto(figura, x, y, contenido, tamano, **estilo)
+        return
+    espacio = (ancho - sum(medir(p, tamano, negrita) for p in palabras)) / (len(palabras) - 1)
+    for palabra in palabras:
+        texto(figura, x, y, palabra, tamano, **estilo)
+        x += medir(palabra, tamano, negrita) + espacio
+
+
+class Articulo:
+    def __init__(self, pdf):
+        self.pdf = pdf
+        self.figura = None
+        self.columna = 0
+        self.y = 738
+        self.tope = 738
+
+    def nueva(self, titulo=False):
+        self.cerrar()
+        self.figura = plt.figure(figsize=(8.5, 11), facecolor='white')
+        self.columna, self.y = 0, 738
+        if titulo:
+            texto(self.figura, 306, 742, 'Especificación de histograma en imágenes', 23, ha='center')
+            texto(self.figura, 306, 715, 'Isaac Pérez Pérez', 11, ha='center')
+            texto(self.figura, 306, 700, 'Licenciatura en Ingeniería de Datos e Inteligencia Artificial', 10, ha='center')
+            texto(self.figura, 306, 687, 'Universidad de Guanajuato', 10, ha='center')
+            texto(self.figura, 306, 674, 'Visión por Computadora · Tarea 4', 10, ha='center')
+            self.y = 647
+        self.tope = self.y
+
+    def cerrar(self):
+        if self.figura is not None:
+            self.pdf.savefig(self.figura)
+            plt.close(self.figura)
+            self.figura = None
+
+    def espacio(self, altura):
+        if self.y - altura < 54:
+            if self.columna == 0:
+                self.columna, self.y = 1, self.tope
+            else:
+                self.nueva()
+
+    def parrafo(self, contenido, tamano=10, negrita=False):
+        lineas = envolver(contenido, COLUMNA, tamano, negrita)
+        paso = tamano * 1.14
+        self.espacio(min(3, len(lineas)) * paso)
+        for i, contenido_linea in enumerate(lineas):
+            self.espacio(paso)
+            x = MARGEN + self.columna * 270
+            linea(self.figura, x, self.y, contenido_linea, COLUMNA,
+                  justificar=i < len(lineas)-1, tamano=tamano, negrita=negrita)
+            self.y -= paso
+        self.y -= 5
+
+    def seccion(self, nombre):
+        self.espacio(45)
+        self.y -= 8
+        x = MARGEN + self.columna * 270 + COLUMNA / 2
+        texto(self.figura, x, self.y, nombre, 10, ha='center')
+        self.y -= 19
+
+    def subtitulo(self, nombre):
+        self.espacio(40)
+        texto(self.figura, MARGEN + self.columna * 270, self.y, nombre, 10, fontstyle='italic')
+        self.y -= 16
+
+    def ecuacion(self, formula, numero):
+        self.espacio(36)
+        x = MARGEN + self.columna * 270
+        texto(self.figura, x + 115, self.y - 5, formula, 11, ha='center')
+        texto(self.figura, x + COLUMNA, self.y - 5, f'({numero})', 10, ha='right')
+        self.y -= 32
+
+
+def panel(figura, fuente, referencia, resultado, superior, caption):
+    imagenes = [fuente, referencia, resultado]
+    rejilla = figura.add_gridspec(3, 3, left=0.09, right=0.94,
+                                 top=superior / ALTO, bottom=(superior-284) / ALTO,
+                                 height_ratios=[2.2, 1, 1], hspace=0.46, wspace=0.27)
+    maximo, histogramas = 0, []
+    for imagen in imagenes:
+        canales = [imagen] if imagen.ndim == 2 else [imagen[:, :, i] for i in range(3)]
+        probabilidades = [histograma(c) / c.size for c in canales]
+        histogramas.append((canales, probabilidades))
+        maximo = max(maximo, max(p.max() for p in probabilidades))
+    for j, (imagen, nombre) in enumerate(zip(imagenes, ['Fuente', 'Referencia', 'Resultado'])):
+        eje = figura.add_subplot(rejilla[0, j])
+        eje.imshow(imagen if imagen.ndim == 2 else cv2.cvtColor(imagen, cv2.COLOR_BGR2RGB),
+                   cmap='gray' if imagen.ndim == 2 else None, vmin=0, vmax=255)
+        eje.set_title(nombre, fontsize=9, pad=3)
+        eje.axis('off')
+        canales, probabilidades = histogramas[j]
+        for fila in [1, 2]:
+            eje = figura.add_subplot(rejilla[fila, j])
+            for i, (canal, probabilidad) in enumerate(zip(canales, probabilidades)):
+                color = '#222222' if len(canales) == 1 else ['#235db8', '#22824c', '#c73131'][i]
+                eje.plot(probabilidad if fila == 1 else cdf(canal), color=color, lw=0.65)
+            eje.set_xlim(0, 255)
+            eje.set_ylim(0, maximo*1.08 if fila == 1 else 1.02)
+            eje.set_xticks([0, 128, 255])
+            eje.tick_params(labelsize=7, pad=1, length=2)
+            eje.grid(alpha=0.2, linewidth=0.4)
+            if fila == 2:
+                eje.set_xlabel('Intensidad', fontsize=8, labelpad=0)
+            if j == 0:
+                eje.set_ylabel('Frecuencia' if fila == 1 else 'CDF', fontsize=8, labelpad=2)
+    for i, fila in enumerate(envolver(caption, 522, 8)):
+        texto(figura, 45, superior - 307 - i*9.2, fila, 8)
 
 
 def main():
-    with (RAIZ / 'resultados/metricas.csv').open(encoding='utf-8') as archivo:
-        filas = list(csv.DictReader(archivo))
-    casos = json.loads((RAIZ / 'experimentos.json').read_text(encoding='utf-8'))
-    ruta = RAIZ / 'reporte/T4_Especificacion_Histograma.pdf'
+    casos = json.loads((RAIZ/'experimentos.json').read_text(encoding='utf-8'))
+    with (RAIZ/'resultados/metricas.csv').open(encoding='utf-8') as f:
+        metricas = list(csv.DictReader(f))
+    ruta = RAIZ/'reporte/T4_Especificacion_Histograma.pdf'
     ruta.parent.mkdir(parents=True, exist_ok=True)
-    with PdfPages(ruta, metadata={'Title': 'T4: Especificación de histograma',
+    with PdfPages(ruta, metadata={'Title': 'Especificación de histograma en imágenes',
                                   'Author': 'Isaac Pérez Pérez'}) as pdf:
-        figura = pagina('T4: Especificación de histograma', 1)
-        columna(figura, [
-            ('Objetivo', 'Implementar la especificación de histograma desde cero y analizar cómo cambia la distribución de intensidades y la apariencia de una imagen. Se comparan escala de grises y procesamiento independiente de los canales B, G y R.'),
-            ('¿En qué consiste?', 'Se transforma una imagen fuente para aproximar la distribución de intensidades de una referencia. La correspondencia se calcula a partir de las funciones de distribución acumulada (CDF). La técnica modifica los valores de los píxeles, sin cambiar sus posiciones [1].'),
-            ('Histograma y CDF', 'Para un nivel k entre 0 y 255, h(k) cuenta los píxeles que tienen ese valor. Si N es el número de píxeles, p(k) = h(k)/N. La CDF es F(k) = suma de p(i), para i desde 0 hasta k. Es creciente en sentido no estricto y termina en 1.')
-        ], 0.055)
-        columna(figura, [
-            ('Correspondencia discreta utilizada', 'T(k) = mínimo j tal que F_ref(j) >= F_fuente(k).\nLa salida en una posición (x, y) se calcula como I_salida(x, y) = T(I_fuente(x, y)). Se construye una tabla de 256 valores y se aplica mediante indexación de NumPy.'),
-            ('Decisiones de implementación', 'Se usa la inversa generalizada discreta con el primer nivel que alcanza la probabilidad fuente. La búsqueda es np.searchsorted(..., side="left") [3]. No se interpola ni se usa una función que resuelva el emparejamiento completo. Los canales se procesan con el mismo criterio.'),
-            ('Límite del método', 'Con imágenes discretas, muchos píxeles de igual intensidad reciben un único valor. Su masa no se puede dividir entre varios niveles mediante esta tabla. Por eso no se garantiza un histograma idéntico, ni control exacto de la iluminación o del significado visual.')
-        ], 0.535)
-        guardar(pdf, figura)
+        a = Articulo(pdf)
+        a.nueva(titulo=True)
+        a.parrafo('Resumen—Se implementó la especificación de histograma mediante funciones de distribución acumulada y una tabla de correspondencias de 256 niveles. Se evaluaron tres pares de fotografías y una referencia bimodal controlada, en escala de grises y por canales BGR independientes. Los 16 canales evaluados redujeron la distancia entre las distribuciones de salida y referencia. Sin embargo, se observaron pérdida de gradación tonal y colores artificiales. El ajuste estadístico no garantiza una mejor apariencia ni la conservación del significado visual.', tamano=9, negrita=True)
+        a.parrafo('Palabras clave—Histograma, CDF, procesamiento de imágenes, transferencia tonal, BGR.', tamano=9, negrita=True)
+        a.seccion('I. INTRODUCCIÓN')
+        a.parrafo('La especificación de histograma transforma las intensidades de una imagen fuente para aproximar su distribución a la de una referencia [1]. La operación permite modificar el aspecto tonal sin trasladar píxeles. A diferencia de una transformación de contraste fija, la correspondencia depende de las distribuciones de ambas imágenes.')
+        a.parrafo('El objetivo de esta práctica es implementar el procedimiento desde cero, comprobarlo con imágenes distintas y explicar sus limitaciones. Se analiza el efecto de una referencia bimodal, la diferencia entre gris y BGR independiente, y su relación con la ecualización clásica. Las Fig. 1–8 muestran los ocho experimentos; la Tabla I resume su ajuste estadístico.')
+        a.seccion('II. MÉTODO')
+        a.subtitulo('A. Histograma, CDF y correspondencia')
+        a.parrafo('Para una imagen de N píxeles y niveles k entre 0 y 255, h(k) es el conteo de píxeles de intensidad k. La frecuencia relativa y su distribución acumulada se definen como:')
+        a.ecuacion(r'$p(k)=h(k)/N,\quad F(k)=\sum_{i=0}^{k}p(i).$', 1)
+        a.parrafo('La CDF es no decreciente y termina en uno. Se emplea la inversa generalizada discreta de la referencia:')
+        a.ecuacion(r'$T(k)=\min\{j:F_{ref}(j)\geq F_{f}(k)\}.$', 2)
+        a.parrafo('La salida se obtiene por I_s(x,y)=T(I_f(x,y)). El código usa np.bincount y np.cumsum para los conteos y acumuladas. La tabla se construye con np.searchsorted(..., side="left"), que selecciona el primer nivel cuya CDF alcanza la probabilidad de la fuente [2]. No se utiliza una función de emparejamiento ya implementada.')
+        a.parrafo('La correspondencia es monótona, pero no necesariamente invertible: puede reunir varios niveles fuente en un solo nivel de salida. Una intensidad que agrupa muchos píxeles recibe un único destino. Su masa no se puede repartir con esta tabla; por eso el histograma final no tiene que ser idéntico al de referencia. Una fuente constante, por ejemplo, permanece constante.')
+        a.subtitulo('B. Datos y protocolo experimental')
+        a.parrafo('Se usaron cuatro fotografías públicas del catálogo de scikit-image [3]: cohete (640 × 427), café (600 × 400), astronauta (512 × 512) y gato (451 × 300), expresadas como ancho × alto. Los pares fueron cohete→café, astronauta→gato y café→cohete. No se recortaron ni redimensionaron las imágenes para calcular los histogramas. Las frecuencias relativas permiten comparar tamaños distintos.')
+        a.parrafo('El cuarto caso usa la astronauta y una referencia sintética de 256 × 256. Con semilla 2026 se generan dos grupos de 32 768 muestras normales, con medias 48 y 204 y desviación 8. Se redondean, limitan a [20,76] y [176,232], mezclan y replican en B, G y R. La referencia presenta dos bandas separadas y no representa una fotografía.')
+        a.parrafo('Cada par se procesa en BGR independiente y en gris. En gris se convierten primero tanto la fuente como la referencia; convertir después la salida BGR es una operación distinta. La salida conserva la forma de la fuente. El cambio BGR→RGB solo se usa para visualizar correctamente los colores.')
+        a.subtitulo('C. Verificación y medidas de distribución')
+        a.parrafo('Pasaron diez pruebas unitarias que comprueban conteos y CDF, identidad con huecos, mapeo conocido, entradas constantes, monotonía y búsqueda exhaustiva, tamaños diferentes, canales independientes, entradas inválidas y control bimodal/ecualización. La ejecución utiliza Python 3.12.14, NumPy 2.3.5, OpenCV 5.0.0 y Matplotlib 3.10.8; no requiere GPU ni scikit-image como dependencia.')
+        a.parrafo('Se calculan dos distancias descriptivas entre la fuente o salida A y la referencia R:')
+        a.ecuacion(r'$W_1^{norm}=\frac{1}{255}\sum_{k=0}^{254}|F_A(k)-F_R(k)|,$', 3)
+        a.ecuacion(r'$D_{KS}=\max_{0\leq k\leq255}|F_A(k)-F_R(k)|.$', 4)
+        a.parrafo('Ambas están entre cero y uno; valores menores indican distribuciones más cercanas. KS se usa sin prueba de hipótesis. Estas medidas no evalúan naturalidad o reconocimiento de objetos. No corresponde calcular RMSE píxel a píxel entre fotografías de escenas distintas.')
+        a.cerrar()
 
-        figura = pagina('Diseño de los experimentos', 2)
-        columna(figura, [
-            ('Imágenes y casos', '1. Cohete como fuente y café como referencia.\n2. Astronauta como fuente y gato como referencia.\n3. Café como fuente y cohete como referencia.\n4. Astronauta y referencia bimodal controlada.\nLas fotografías se conservan sin recortar ni redimensionar. Sus tamaños pueden ser distintos porque se comparan frecuencias relativas, no píxeles correspondientes.'),
-            ('Referencia bimodal', 'Se generan 65 536 valores con semilla 2026: la mitad alrededor de 48 y la otra mitad alrededor de 204, con desviación 8. Se redondean, limitan a [20, 76] y [176, 232], y mezclan. Los tres canales reciben los mismos valores. La imagen es sintética y se usa como control, no como fotografía.'),
-            ('Comparación justa', 'Cada par se evalúa en BGR independiente y en gris. Para gris se convierten primero tanto la fuente como la referencia con OpenCV. No se compara convertir después del procesamiento BGR: esas operaciones no son equivalentes.')
-        ], 0.055)
-        columna(figura, [
-            ('Medidas descriptivas', 'W1 normalizada = suma de |F_salida(k) - F_ref(k)|, para k de 0 a 254, dividida entre 255. Su rango es [0, 1]. KS = máximo de esa diferencia absoluta. Un valor menor indica mayor cercanía de distribuciones. Se guardan antes y después en metricas.csv. KS se usa como distancia, sin prueba de hipótesis.'),
-            ('Verificación del código', 'Pasaron 10 pruebas unitarias: conteos y CDF, identidad, mapeo conocido, referencia constante, fuente constante, monotonía y comparación con búsqueda exhaustiva, tamaños distintos, canales independientes, entradas inválidas y control bimodal/ecualización.'),
-            ('Ejecución y procedencia', 'Python 3.12.14, NumPy 2.3.5, OpenCV 5.0.0 y Matplotlib 3.10.8. No se necesita GPU. Las fotos proceden de los datos públicos de scikit-image [4]; no se instala ni se importa esa biblioteca. El código del proyecto utiliza solo las tres bibliotecas permitidas y módulos estándar de Python.')
-        ], 0.535)
-        guardar(pdf, figura)
+        nombres = ['Cohete con referencia de café', 'Astronauta con referencia de gato',
+                   'Café con referencia de cohete', 'Astronauta con referencia bimodal sintética']
+        for i, caso in enumerate(casos):
+            figura = plt.figure(figsize=(8.5, 11), facecolor='white')
+            fuente, referencia = leer(RAIZ/caso['fuente']), leer(RAIZ/caso['referencia'])
+            for j, modo in enumerate(['bgr', 'gris']):
+                f, r = fuente, referencia
+                if modo == 'gris':
+                    f = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
+                    r = cv2.cvtColor(r, cv2.COLOR_BGR2GRAY)
+                resultado = cv2.imread(str(RAIZ/f"resultados/{caso['nombre']}_{modo}.png"),
+                                       cv2.IMREAD_GRAYSCALE if modo == 'gris' else cv2.IMREAD_COLOR)
+                caption = (f'Fig. {i*2+j+1}. {nombres[i]}, {"BGR independiente" if modo == "bgr" else "escala de grises"}. '
+                           'Arriba: comparación visual. Centro: histogramas normalizados. Abajo: CDF. '
+                           + ('Curvas azul, verde y roja: canales B, G y R.' if modo == 'bgr' else 'Se convierten ambas entradas antes del emparejamiento.'))
+                panel(figura, f, r, resultado, 738 - j*345, caption)
+            pdf.savefig(figura)
+            plt.close(figura)
 
-        notas = {
-            '01_cohete_cafe': {
-                'bgr': 'La escena adquiere una dominante cálida: el cielo cambia de azul a naranja. Los histogramas se aproximan a la referencia, aunque aparecen niveles vacíos y picos por el mapeo discreto.',
-                'gris': 'Se mantiene la disposición del cohete y las torres, pero cambia su contraste. Al eliminar el color se estudia una sola distribución de brillo.'},
-            '02_astronauta_gato': {
-                'bgr': 'El retrato adopta tonos más apagados y cálidos. Los negros de la fuente concentran muchos píxeles en un solo nivel de salida; no se pueden repartir para copiar exactamente el histograma del gato.',
-                'gris': 'El rostro sigue siendo reconocible, pero el contraste y los tonos oscuros cambian. La CDF de salida conserva un salto apreciable debido a los píxeles que compartían una intensidad fuente.'},
-            '03_cafe_cohete': {
-                'bgr': 'El café adquiere una dominante azulada y se comprime su rango tonal. Invertir fuente y referencia produce otro resultado; el proceso no es simétrico ni necesariamente reversible.',
-                'gris': 'El resultado concentra intensidades en la zona oscura, como la referencia del cohete. El cambio de histograma no crea los objetos ni la iluminación física de la escena de referencia.'},
-            '04_astronauta_bimodal': {
-                'bgr': 'Surgen dos grupos tonales por canal y colores artificiales. Aunque la referencia tiene B = G = R, las tablas de los canales fuente son distintas, por lo que la salida no tiene que ser gris.',
-                'gris': 'La distribución se divide en dos bandas separadas. Se reconoce el retrato, pero se pierde gradación tonal. La masa de píxeles negros de la fuente genera un pico y evita copiar exactamente la referencia.'}
-        }
-        numero = 3
-        for caso in casos:
-            nombre = caso['nombre']
-            for modo in ['bgr', 'gris']:
-                imagen = plt.imread(RAIZ / f'resultados/{nombre}_{modo}_comparacion.png')
-                figura = plt.figure(figsize=(11.69, 8.27), facecolor='white')
-                eje = figura.add_axes([0.025, 0.13, 0.95, 0.85])
-                eje.imshow(imagen)
-                eje.axis('off')
-                texto = '\n'.join(textwrap.wrap(notas[nombre][modo], width=150))
-                figura.text(0.055, 0.105, texto, va='top', fontsize=10, linespacing=1.4)
-                figura.text(0.055, 0.025, 'Cada columna usa el mismo eje de intensidades; histogramas normalizados. B: azul, G: verde, R: rojo.', fontsize=8, color='#555555')
-                figura.text(0.95, 0.025, str(numero), ha='right', fontsize=9)
-                guardar(pdf, figura)
-                numero += 1
-
-        figura = pagina('Resultados y respuestas', numero)
-        tabla_datos = []
-        for caso in casos:
-            for modo in ['bgr', 'gris']:
-                seleccion = [f for f in filas if f['caso'] == caso['nombre'] and f['modo'] == modo]
-                antes = np.mean([float(f['w1_antes']) for f in seleccion])
-                despues = np.mean([float(f['w1_despues']) for f in seleccion])
-                tabla_datos.append([caso['nombre'][:2], modo.upper(), f'{antes:.5f}', f'{despues:.5f}'])
-        eje = figura.add_axes([0.055, 0.56, 0.43, 0.27])
-        eje.axis('off')
-        tabla = eje.table(cellText=tabla_datos, colLabels=['Caso', 'Modo', 'W1 antes', 'W1 después'], loc='center', cellLoc='center')
-        tabla.auto_set_font_size(False)
-        tabla.set_fontsize(10)
-        tabla.scale(1, 1.55)
-        for (fila, col), celda in tabla.get_celld().items():
-            celda.set_edgecolor('#dddddd')
-            if fila == 0:
-                celda.set_facecolor(AZUL)
-                celda.set_text_props(color='white')
-        columna(figura, [
-            ('Interpretación', 'En BGR la tabla muestra el promedio de los tres canales; en gris, la única distancia. Los 16 canales evaluados redujeron W1. Esto mide ajuste de distribuciones, no calidad perceptual ni conservación semántica. No corresponde calcular RMSE entre fotos de escenas distintas.'),
-            ('1. Referencia bimodal y semántica', 'La salida tiende a concentrarse en dos grupos de intensidades. Se conservan las posiciones de los píxeles y pueden reconocerse objetos, pero no se garantiza su significado: colores relevantes, texturas o bordes débiles pueden perderse. El algoritmo no reconoce objetos.')
-        ], 0.055, y=0.48)
-        columna(figura, [
-            ('2. Gris frente a BGR independiente', 'En gris solo se empareja una distribución; no se conserva información de color. En BGR se emparejan tres distribuciones marginales por separado [1]. Esto no obliga a que coincida la distribución conjunta de colores de la referencia. Las relaciones entre canales cambian y pueden aparecer tonos poco naturales, como en el control bimodal.\nAdemás, convertir a gris el resultado BGR no equivale a emparejar imágenes previamente convertidas a gris.'),
-            ('3. Relación con la ecualización', 'La ecualización usa la CDF de la fuente para extender las intensidades y aproximarse a una distribución uniforme [2]. La especificación incorpora además la inversa de la CDF deseada. En el caso continuo, una referencia uniforme conduce a la ecualización.\nEn 8 bits no hay garantía de uniformidad exacta. La función ecualizar del proyecto usa round(255 F(k)); no resta CDF_min. Por ello puede diferir de implementaciones como cv2.equalizeHist.'),
-            ('Conclusión', 'La especificación permite trasladar distribuciones tonales, pero un mejor ajuste estadístico no garantiza una imagen más natural. La elección de referencia y el procesamiento de color determinan gran parte del resultado.')
-        ], 0.535)
-        guardar(pdf, figura)
-
-        figura = pagina('Reproducción y bibliografía', numero + 1)
-        columna(figura, [
-            ('Cómo reproducir', 'Desde la carpeta del proyecto:\npython -m pip install -r requirements.txt\npython -m unittest discover -s tests -v\npython main.py\npython generar_reporte.py\nLas fotografías ya están incluidas. La ejecución no descarga archivos. main.py genera las salidas PNG, las comparaciones y metricas.csv; generar_reporte.py usa esos archivos para crear este PDF.'),
-            ('Archivos y licencias', 'datos/fuentes.csv registra procedencia y atribución. datos/manifest.json contiene hashes SHA-256 de las cinco entradas. Astronauta: NASA, dominio público; café: Rachel Michetti, CC0; gato: Stefan van der Walt, CC0; cohete: SpaceX, dominio público, según el catálogo consultado [4].'),
-            ('Alcance de la evaluación', 'Los resultados corresponden a cuatro casos seleccionados y no prueban que el algoritmo mejore toda imagen. La conservación semántica se discutió visualmente, sin un experimento de clasificación ni una medida automática de reconocimiento.')
-        ], 0.055)
-        columna(figura, [
-            ('Referencias (formato IEEE)', '[1] scikit-image contributors, "Histogram matching," scikit-image 0.22.0 documentation. [En línea]. Disponible: https://scikit-image.org/docs/0.22.x/auto_examples/color_exposure/plot_histogram_matching.html. [Consultado: 31-oct-2026].\n[2] A. Huamán, "Histogram Equalization," OpenCV 4.11.0 documentation. [En línea]. Disponible: https://docs.opencv.org/4.11.0/d4/d1b/tutorial_histogram_equalization.html. [Consultado: 31-oct-2026].\n[3] NumPy developers, "numpy.searchsorted," NumPy documentation. [En línea]. Disponible: https://numpy.org/doc/stable/reference/generated/numpy.searchsorted.html. [Consultado: 31-oct-2026].\n[4] scikit-image contributors, "skimage/data/_fetchers.py," scikit-image, versión v0.19.3, GitHub. [En línea]. Disponible: https://github.com/scikit-image/scikit-image/blob/v0.19.3/skimage/data/_fetchers.py. [Consultado: 31-oct-2026].')
-        ], 0.535, ancho=65)
-        guardar(pdf, figura)
-    print(f'Reporte generado: {ruta}')
+        a = Articulo(pdf)
+        a.nueva()
+        a.seccion('III. RESULTADOS')
+        a.parrafo('La Tabla I muestra W1 normalizada antes y después. Para BGR se promedian sus tres canales; en gris se reporta la única distribución. Las 16 comparaciones por canal redujeron W1. Las distancias KS individuales se conservan en resultados/metricas.csv y no deben interpretarse como una validación perceptual.')
+        a.espacio(160)
+        x = MARGEN+a.columna*270
+        texto(a.figura, x+126, a.y, 'TABLA I', 8, ha='center')
+        texto(a.figura, x+126, a.y-12, 'DISTANCIA W1 NORMALIZADA', 8, ha='center')
+        a.y -= 28
+        for dx, cabecera in [(0,'Caso'),(45,'Modo'),(105,'Antes'),(183,'Después')]:
+            texto(a.figura,x+dx,a.y,cabecera,9,fontweight='bold')
+        a.y -= 14
+        for i, caso in enumerate(casos):
+            for modo in ['bgr','gris']:
+                filas = [r for r in metricas if r['caso']==caso['nombre'] and r['modo']==modo]
+                valores = [str(i+1),modo.upper()] + [f'{np.mean([float(r[c]) for r in filas]):.5f}' for c in ['w1_antes','w1_despues']]
+                for dx, valor in zip([0,45,105,183],valores):
+                    texto(a.figura,x+dx,a.y,valor,9)
+                a.y -= 12
+        a.y -= 10
+        a.parrafo('En el primer caso (Fig. 1–2), el cohete adquiere una dominante cálida al usar la fotografía del café. En el segundo (Fig. 3–4), el retrato adopta tonos más apagados y cálidos. La fuente contiene numerosos píxeles negros, que forman un salto en la CDF de salida; en gris, KS después es 0.10865. La tabla no puede dividir esa masa entre distintos niveles.')
+        a.parrafo('Al invertir el par café/cohete (Fig. 5–6), el café adquiere una dominante azulada y una distribución más oscura. El procedimiento no es simétrico ni necesariamente reversible. En el control bimodal (Fig. 7–8), la salida se concentra en dos bandas; los canales independientes generan colores artificiales y se reduce la gradación tonal del retrato.')
+        a.seccion('IV. DISCUSIÓN DE LAS PREGUNTAS')
+        a.subtitulo('A. Referencia bimodal y conservación semántica')
+        a.parrafo('Una referencia bimodal concentra intensidades alrededor de dos grupos. La transformación aproxima esa distribución y puede separar las zonas oscuras de las claras, con pérdida de tonos intermedios. En la Fig. 8 todavía se reconoce a la persona, pero se pierden gradaciones del rostro y del traje. La posición de los píxeles se conserva; su significado visual no está garantizado. Pueden desaparecer texturas, bordes débiles o colores relevantes. El método no reconoce objetos y la observación visual no sustituye una evaluación semántica automática.')
+        a.subtitulo('B. Escala de grises frente a BGR independiente')
+        a.parrafo('En gris se empareja una sola distribución de brillo y se descarta el color. En BGR se procesan tres distribuciones marginales por separado [1]. Esto no iguala la distribución conjunta de colores ni mantiene necesariamente las relaciones originales entre canales. Por ello una CDF cercana puede acompañarse de un resultado poco natural.')
+        a.parrafo('El control de la Fig. 7 lo muestra claramente: la referencia tiene B=G=R, pero la fuente tiene CDF distintas por canal. Las tres tablas de correspondencia son diferentes, por lo que un píxel fuente puede recibir tres intensidades distintas y seguir siendo coloreado. Una referencia gris no obliga a obtener una salida gris cuando el procesamiento es independiente.')
+        a.subtitulo('C. Relación con la ecualización clásica')
+        a.parrafo('La ecualización transforma las intensidades mediante la CDF de la fuente para extender el rango y aproximarse a una distribución uniforme [4]. La especificación añade la inversa de una CDF objetivo. En el caso continuo, elegir una referencia uniforme conduce a la ecualización. En imágenes discretas, los empates y la cuantización impiden garantizar uniformidad exacta.')
+        a.parrafo('La función ecualizar del proyecto usa round(255 F(k)), sin restar CDF_min. Puede diferir de cv2.equalizeHist. Esta diferencia de convención no cambia la relación conceptual entre ambos métodos y se declara para no atribuir equivalencia numérica exacta a implementaciones distintas.')
+        a.seccion('V. CONCLUSIONES')
+        a.parrafo('La implementación aproxima las distribuciones de referencia en los cuatro casos y mantiene el tamaño de cada fuente. Los histogramas y CDF comprueban el cambio estadístico, mientras las comparaciones visuales muestran sus límites. Una referencia bimodal puede eliminar gradación; el procesamiento BGR puede alterar colores relevantes. La conservación semántica no está garantizada por una mejora de W1 o KS. Las conclusiones se limitan a estos cuatro pares seleccionados.')
+        a.parrafo('El proyecto incluye los originales y sus hashes. Puede reproducirse sin red con python main.py y python generar_reporte.py, tras instalar requirements.txt. Las fotografías se atribuyen a NASA (astronauta), Rachel Michetti (café), Stefan van der Walt (gato) y SpaceX (cohete), con sus condiciones registradas en datos/fuentes.csv [3].')
+        a.seccion('REFERENCIAS')
+        referencias = [
+            '[1] scikit-image contributors, “Histogram matching,” scikit-image 0.22.0 documentation. [En línea]. Disponible: https://scikit-image.org/docs/0.22.x/auto_examples/color_exposure/plot_histogram_matching.html. [Consultado: 31-oct-2026].',
+            '[2] NumPy developers, “numpy.searchsorted,” NumPy documentation. [En línea]. Disponible: https://numpy.org/doc/stable/reference/generated/numpy.searchsorted.html. [Consultado: 31-oct-2026].',
+            '[3] scikit-image contributors, “skimage/data/_fetchers.py,” scikit-image, v0.19.3, GitHub. [En línea]. Disponible: https://github.com/scikit-image/scikit-image/blob/v0.19.3/skimage/data/_fetchers.py. [Consultado: 31-oct-2026].',
+            '[4] A. Huamán, “Histogram Equalization,” OpenCV 4.11.0 documentation. [En línea]. Disponible: https://docs.opencv.org/4.11.0/d4/d1b/tutorial_histogram_equalization.html. [Consultado: 31-oct-2026].']
+        for referencia in referencias:
+            a.parrafo(referencia, tamano=8)
+        a.cerrar()
+    print(ruta)
 
 
 if __name__ == '__main__':

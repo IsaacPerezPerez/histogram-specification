@@ -6,7 +6,7 @@ Implementación en Python para aproximar el histograma de una imagen fuente al d
 
 ## Reporte y resultados
 
-El [reporte PDF](reporte/T4_Especificacion_Histograma.pdf) incluye el procedimiento, los cuatro experimentos, las respuestas de la actividad y la bibliografía IEEE.
+El [reporte PDF en formato IEEE](reporte/T4_Especificacion_Histograma.pdf), con texto en dos columnas y ocho figuras, incluye el procedimiento, los cuatro experimentos, las respuestas de la actividad y la bibliografía IEEE.
 
 Las siguientes figuras muestran fuente, referencia y resultado, con sus histogramas y CDF. No es necesario ejecutar el programa para consultarlas.
 
