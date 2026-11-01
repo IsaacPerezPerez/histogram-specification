@@ -1,0 +1,6 @@
+archivo,descripcion,autor,licencia_segun_catalogo,origen,consulta
+originales/astronaut.png,Retrato de Eileen Collins,NASA,Dominio público,https://raw.githubusercontent.com/scikit-image/scikit-image/v0.19.3/skimage/data/astronaut.png,2026-10-31
+originales/coffee.png,Taza de café,Rachel Michetti,CC0,https://raw.githubusercontent.com/scikit-image/scikit-image/v0.19.3/skimage/data/coffee.png,2026-10-31
+originales/chelsea.png,Gato Chelsea,Stefan van der Walt,CC0,https://raw.githubusercontent.com/scikit-image/scikit-image/v0.19.3/skimage/data/chelsea.png,2026-10-31
+originales/rocket.jpg,Lanzamiento DSCOVR Falcon 9,SpaceX,Dominio público,https://raw.githubusercontent.com/scikit-image/scikit-image/v0.19.3/skimage/data/rocket.jpg,2026-10-31
+control/bimodal.png,Referencia bimodal sintética,Generada por main.py,Control propio semilla 2026,main.py preparar_control,2026-10-31
