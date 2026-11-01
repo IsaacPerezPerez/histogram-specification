@@ -1,0 +1,6 @@
+[
+  {"nombre": "01_cohete_cafe", "fuente": "datos/originales/rocket.jpg", "referencia": "datos/originales/coffee.png"},
+  {"nombre": "02_astronauta_gato", "fuente": "datos/originales/astronaut.png", "referencia": "datos/originales/chelsea.png"},
+  {"nombre": "03_cafe_cohete", "fuente": "datos/originales/coffee.png", "referencia": "datos/originales/rocket.jpg"},
+  {"nombre": "04_astronauta_bimodal", "fuente": "datos/originales/astronaut.png", "referencia": "datos/control/bimodal.png"}
+]
